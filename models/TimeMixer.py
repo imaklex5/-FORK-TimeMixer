@@ -160,7 +160,7 @@ class PastDecomposableMixing(nn.Module):
         # Decompose to obtain the season and trend
         season_list = []
         trend_list = []
-        for x in x_list:
+        for x in x_list: # 对于不同的尺度
             season, trend = self.decompsition(x)
             if self.channel_independence == 0:
                 season = self.cross_layer(season)
@@ -283,7 +283,7 @@ class Model(nn.Module):
                 x_1, x_2 = self.preprocess(x)
                 out1_list.append(x_1)
                 out2_list.append(x_2)
-            return (out1_list, out2_list)
+            return (out1_list, out2_list) # [season, trend]
 
     def __multi_scale_process_inputs(self, x_enc, x_mark_enc):
         if self.configs.down_sampling_method == 'max':
@@ -299,14 +299,16 @@ class Model(nn.Module):
                                   bias=False)
         else:
             return x_enc, x_mark_enc
+        # Pooling 沿时间维度进行
         # B,T,C -> B,C,T
         x_enc = x_enc.permute(0, 2, 1)
 
-        x_enc_ori = x_enc
+        x_enc_ori = x_enc # 用于迭代下采样
         x_mark_enc_mark_ori = x_mark_enc
 
         x_enc_sampling_list = []
         x_mark_sampling_list = []
+        # [0] 最细粒度数据
         x_enc_sampling_list.append(x_enc.permute(0, 2, 1))
         x_mark_sampling_list.append(x_mark_enc)
 
@@ -316,8 +318,9 @@ class Model(nn.Module):
             x_enc_sampling_list.append(x_enc_sampling.permute(0, 2, 1))
             x_enc_ori = x_enc_sampling
 
+            # 对时间特征下采样
             if x_mark_enc_mark_ori is not None:
-                x_mark_sampling_list.append(x_mark_enc_mark_ori[:, ::self.configs.down_sampling_window, :])
+                x_mark_sampling_list.append(x_mark_enc_mark_ori[:, ::self.configs.down_sampling_window, :]) # python切片 start:end:step
                 x_mark_enc_mark_ori = x_mark_enc_mark_ori[:, ::self.configs.down_sampling_window, :]
 
         x_enc = x_enc_sampling_list
@@ -329,7 +332,8 @@ class Model(nn.Module):
         return x_enc, x_mark_enc
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
-
+        
+        # 如果使用了时间特征 则进行时间特征编码
         if self.use_future_temporal_feature:
             if self.channel_independence == 1:
                 B, T, N = x_enc.size()
@@ -342,26 +346,29 @@ class Model(nn.Module):
 
         x_list = []
         x_mark_list = []
-        if x_mark_enc is not None:
+        # 标准化
+        if x_mark_enc is not None: # 是否处理时间特征
             for i, x, x_mark in zip(range(len(x_enc)), x_enc, x_mark_enc):
                 B, T, N = x.size()
+                # ReVIN
                 x = self.normalize_layers[i](x, 'norm')
-                if self.channel_independence == 1:
+                if self.channel_independence == 1: # 单变量预测 不进行通道交互
                     x = x.permute(0, 2, 1).contiguous().reshape(B * N, T, 1)
-                    x_mark = x_mark.repeat(N, 1, 1)
+                    x_mark = x_mark.repeat(N, 1, 1) # torch.repear(size) size: 每个维度重复的次数
                 x_list.append(x)
                 x_mark_list.append(x_mark)
         else:
             for i, x in zip(range(len(x_enc)), x_enc, ):
                 B, T, N = x.size()
+                # ReVIN
                 x = self.normalize_layers[i](x, 'norm')
                 if self.channel_independence == 1:
                     x = x.permute(0, 2, 1).contiguous().reshape(B * N, T, 1)
                 x_list.append(x)
 
-        # embedding
+        # 嵌入
         enc_out_list = []
-        x_list = self.pre_enc(x_list)
+        x_list = self.pre_enc(x_list) # 时序分解 得到多尺度季节特征和趋势特征 如果是单变量预测则不分解
         if x_mark_enc is not None:
             for i, x, x_mark in zip(range(len(x_list[0])), x_list[0], x_mark_list):
                 enc_out = self.enc_embedding(x, x_mark)  # [B,T,C]
@@ -379,6 +386,7 @@ class Model(nn.Module):
         dec_out_list = self.future_multi_mixing(B, enc_out_list, x_list)
 
         dec_out = torch.stack(dec_out_list, dim=-1).sum(-1)
+        # denormalize
         dec_out = self.normalize_layers[0](dec_out, 'denorm')
         return dec_out
 
@@ -387,12 +395,14 @@ class Model(nn.Module):
         if self.channel_independence == 1:
             x_list = x_list[0]
             for i, enc_out in zip(range(len(x_list)), enc_out_list):
+                # 将不同尺度的历史信息长度对齐到预测长度
                 dec_out = self.predict_layers[i](enc_out.permute(0, 2, 1)).permute(
                     0, 2, 1)  # align temporal dimension
                 if self.use_future_temporal_feature:
                     dec_out = dec_out + self.x_mark_dec
                     dec_out = self.projection_layer(dec_out)
                 else:
+                    # 投影到目标变量空间
                     dec_out = self.projection_layer(dec_out)
                 dec_out = dec_out.reshape(B, self.configs.c_out, self.pred_len).permute(0, 2, 1).contiguous()
                 dec_out_list.append(dec_out)

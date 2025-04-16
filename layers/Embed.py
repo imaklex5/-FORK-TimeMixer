@@ -30,6 +30,9 @@ class TokenEmbedding(nn.Module):
     def __init__(self, c_in, d_model):
         super(TokenEmbedding, self).__init__()
         padding = 1 if torch.__version__ >= '1.5.0' else 2
+        # 传统的Embedding使用线性层，目的是降维和语义表示，但是采用全局线性变换无法保留局部模式
+        # 对于时序任务，使用卷积操作进行嵌入可以捕捉局部模式，保持序列结构，同时可以处理变长的输入
+        # padding_mode='circular' ：适配周期性数据，避免边界信息丢失。
         self.tokenConv = nn.Conv1d(in_channels=c_in, out_channels=d_model,
                                    kernel_size=3, padding=padding, padding_mode='circular', bias=False)
         for m in self.modules():
@@ -38,11 +41,15 @@ class TokenEmbedding(nn.Module):
                     m.weight, mode='fan_in', nonlinearity='leaky_relu')
 
     def forward(self, x):
+        # shape: [B, L, C] -> [B, C, L] -> [B, C, d_model] -> [B, d_model, C]
         x = self.tokenConv(x.permute(0, 2, 1)).transpose(1, 2)
         return x
 
 
 class FixedEmbedding(nn.Module):
+    '''
+    固定频率编码
+    '''
     def __init__(self, c_in, d_model):
         super(FixedEmbedding, self).__init__()
 
@@ -73,6 +80,8 @@ class TemporalEmbedding(nn.Module):
         day_size = 32
         month_size = 13
 
+        # FixedEmbedding: 固定编码，不可学习
+        # nn.Embedding: 可学习嵌入层，学习时间表征
         Embed = FixedEmbedding if embed_type == 'fixed' else nn.Embedding
         if freq == 't':
             self.minute_embed = Embed(minute_size, d_model)
@@ -160,9 +169,11 @@ class DataEmbedding_ms(nn.Module):
 class DataEmbedding_wo_pos(nn.Module):
     def __init__(self, c_in, d_model, embed_type='fixed', freq='h', dropout=0.1):
         super(DataEmbedding_wo_pos, self).__init__()
-
+        # 值嵌入
         self.value_embedding = TokenEmbedding(c_in=c_in, d_model=d_model)
+        # 位置编码嵌入 (forward中未使用)
         self.position_embedding = PositionalEmbedding(d_model=d_model)
+        # 时间特征嵌入
         self.temporal_embedding = TemporalEmbedding(d_model=d_model, embed_type=embed_type,
                                                     freq=freq) if embed_type != 'timeF' else TimeFeatureEmbedding(
             d_model=d_model, embed_type=embed_type, freq=freq)
